@@ -16,9 +16,14 @@ class PhotonLibrary(object):
     The voxelized volume boundary in the world coordinate is defined by _min and _max attributes.
     The look up table of shape (K,N) can be found in _vis attribute.
 
-    A single important attribute function of the class is VisibilityXYZ(position,channel=None).
-    It returns the visibility value (FP32) given a position and an optical detector identified by channel.
-    If you leave channel unspecified, it returns an array of visibility corresponding to all detectors.
+    Two useful attribute functions
+    
+      - VisibilityXYZ(position,channel=None) returns the visibility value (FP32) given a position and 
+        an optical detector identified by channel. If you leave channel unspecified, it returns an array 
+        of visibility corresponding to all detectors.
+        
+      - numpy(ch=None) returns a look-up table in a 3+1D numpy array where dimensions are (x,y,z,ch).
+        If ch argument is given to specify a particular optical detector, the returned array will be 3D (x,y,z).
     '''
         
         
@@ -37,11 +42,25 @@ class PhotonLibrary(object):
             raise Exception
 
         with h5.File(fname,'r') as f:
-            self._vis = np.array(f['vis'])
-            self._min = np.array(f['min'])
-            self._max = np.array(f['max'])
-            self._npx = np.array(f['numvox'])
+            self._vis  = np.array(f['vis'])
+            self._min  = np.array(f['min'])
+            self._max  = np.array(f['max'])
+            self.shape = np.array(f['numvox'])
             
+        pmt_data = np.loadtxt('pmt_loc.csv',skiprows=1,delimiter=',')
+        if not (pmt_data[:,0].astype(np.int32) == np.arange(pmt_data.shape[0])).all():
+            raise Exception('pmt_loc.csv contains optical channel data not in order of channel numbers')
+        self._pmt_pos = pmt_data[:,1:4]
+        self._pmt_dir = pmt_data[:,4:7]
+        if not self._pmt_pos.shape[0] == self._vis.shape[1]:
+            raise Exception('Optical detector count mismatch: photon library %d v.s. pmt_loc.csv %d' % (self._vis.shape[1],
+                                                                                                        self._pmt_pos.shape[0])
+                           )
+        if ((self._pmt_pos < self._min) | (self._max < self._pmt_pos)).any():
+            raise Exception('Some PMT positions are out of the volume bounds')
+        # Convert the PMT positions in a normalized coordinate (fractional position within the voxelized volume)
+        self._pmt_pos = (self._pmt_pos - self._min) / (self._max - self._min)
+        
         # Run voxelID <=> position self consistency check
         self._ConsistencyCheck_()
         
@@ -62,6 +81,22 @@ class PhotonLibrary(object):
     
     def __str__(self):
         print(self.__class__)
+        
+        
+    def numpy(self,ch=None):
+        '''
+        Returns a 3+1D numpy array of the visibility look up table, where dimensions correspond to (x,y,z,channel)
+        INPUT
+          ch - An integer to specify an optical detector ID. If provided, the return will be 3D array
+        '''
+        shape = [self.shape[2],self.shape[1],self.shape[0]]
+        original = self._vis
+        if ch is None:
+            shape.append(self._vis.shape[1])
+        else:
+            original = self._vis[:,ch]
+            
+        return np.swapaxes(original.reshape(shape),0,2)
     
     
     def Visibility(self, vid, ch=None):
@@ -118,7 +153,7 @@ class PhotonLibrary(object):
         array_ctor = np.array if use_numpy else torch.Tensor
         
         pos = np.random.uniform(size=num_points*3).reshape(num_points,3)
-        axis_id = (pos[:] * self._npx).astype(np.int32)
+        axis_id = (pos[:] * self.shape).astype(np.int32)
         
         if use_world_coordinate:
             pos = array_ctor([self.AxisID2Position(apos) for apos in axis_id])
@@ -153,7 +188,7 @@ class PhotonLibrary(object):
         RETURN
           The voxel ID (single integer)          
         '''
-        return axis_id[0] + axis_id[1]*self._npx[0] + axis_id[2]*(self._npx[0] * self._npx[1])
+        return axis_id[0] + axis_id[1]*self.shape[0] + axis_id[2]*(self.shape[0] * self.shape[1])
         
         
     def Position2VoxID(self, pos):
@@ -164,12 +199,12 @@ class PhotonLibrary(object):
         RETURN
           The voxel ID (single integer)          
         '''
-        axis_id = ((pos - self._min) / (self._max - self._min) * self._npx).astype(np.int32)
+        axis_id = ((pos - self._min) / (self._max - self._min) * self.shape).astype(np.int32)
         
-        if (axis_id < 0).any() or (axis_id >= self._npx).any():
+        if (axis_id < 0).any() or (axis_id >= self.shape).any():
             return -1
         
-        return axis_id[0] + axis_id[1]*self._npx[0] + axis_id[2]*(self._npx[0] * self._npx[1])
+        return axis_id[0] + axis_id[1]*self.shape[0] + axis_id[2]*(self.shape[0] * self.shape[1])
 
     
     def VoxID2AxisID(self, vid):
@@ -180,9 +215,9 @@ class PhotonLibrary(object):
         RETURN
           Length 3 integer array noting the position in discretized index along xyz axis
         '''
-        xid = int(vid) % self._npx[0]
-        yid = int((vid - xid) / self._npx[0]) % self._npx[1]
-        zid = int((vid - xid - (yid * self._npx[0])) / (self._npx[0] * self._npx[1])) % self._npx[2]
+        xid = int(vid) % self.shape[0]
+        yid = int((vid - xid) / self.shape[0]) % self.shape[1]
+        zid = int((vid - xid - (yid * self.shape[0])) / (self.shape[0] * self.shape[1])) % self.shape[2]
         
         return np.array([xid,yid,zid]).astype(np.float32) 
     
@@ -206,8 +241,37 @@ class PhotonLibrary(object):
         RETURN
           Length 3 floating point array noting the position along xyz axis
         '''    
-        return self._min + (self._max - self._min) / self._npx * (axis_id + 0.5)
-
+        return self._min + (self._max - self._min) / self.shape * (axis_id + 0.5)
+    
+    
+    def Position2Features(self, pos, ch=None, use_world_coordinate=False):
+        '''
+        Takes a voxel ID and returns a geometrical feture vector for a specified optical detector
+        INPUT
+          vid - The voxel ID (single integer)
+          ch  - Optial detector ID (optional, if None, feature vector is made for all detectors in a single array)
+        RETURN
+          A 2D array of shape (N,2) where two features are (1/r^2, theta). If ch is specified, N=1.
+        '''
+        if self._pmt_pos is None:
+            raise Exception('PMT position information is not available... (check if pmt_pos exists)')
+        if not use_world_coordinate:
+            assert ((0 <= pos) & (pos <= 1)).all()
+        else:
+            assert ((self._min <= pos) & (pos <= self._max)).all()
+            pos = (pos - self._min) / (self._max - self._min)
+        
+        diff = pos - self._pmt_pos[:]
+        pmt_dir = self._pmt_dir
+        if ch is not None:
+            diff = diff[ch].reshape([1,-1])
+            pmt_dir = self._pmt_dir[ch].reshape([1,-1])
+            
+        r2 = np.sum(diff**2,axis=1)
+        theta = np.arccos(np.sum(diff * pmt_dir,axis=1) / np.sqrt(r2))
+        
+        return np.column_stack([1./r2,theta])
+        
 
     def BoundaryMin(self):
         '''
@@ -227,15 +291,17 @@ class PhotonLibrary(object):
         '''
         Returns the number of voxels along each axis
         '''
-        return self._npx
+        return self.shape
     
     
     
-    def Visibility2D(self, axis, frac):
+    def Visibility2D(self, axis, frac, ch=None):
         '''
-        Provides a 2D slice of a visibility map at a fractional location along Z axis
+        Provides a 2D slice of a visibility map at a fractional location along the specified axis
         INPUT
-          z_frac - A floating point value in the range [0,1] to specify the Z slice location along Z-axis.
+          axis - One of three cartesian axis 'x', 'y', or 'z'
+          frac - A floating point value in the range [0,1] to specify the location, in fraction, along the axis
+          ch   - An integer or a list of integers specifying a (set of) optical detectors (if not provided, visibility for all detectors are summed)
         RETURN
           2D (XY) slice of a visibility map
         '''
@@ -252,26 +318,30 @@ class PhotonLibrary(object):
             print('frac must be between 0.0 and 1.0')
             raise ValueError
             
-        loc_target = int(float(frac) * self._npx[itarget] + 0.5)
-        result = np.zeros(shape=[self._npx[ia],self._npx[ib]],dtype=np.float32)
+        loc_target = int(float(frac) * self.shape[itarget] + 0.5)
+        result = np.zeros(shape=[self.shape[ia],self.shape[ib]],dtype=np.float32)
         axis_id = [0,0,0]
-        for loc_a in range(self._npx[ia]):
-            for loc_b in range(self._npx[ib]):
+        chs = np.arange(len(self._vis[0]))
+        if ch is not None:
+            chs = [ch] if type(ch) == type(int()) else ch
+        for loc_a in range(self.shape[ia]):
+            for loc_b in range(self.shape[ib]):
                 axis_id[itarget] = loc_target
                 axis_id[ia]      = loc_a
                 axis_id[ib]      = loc_b
                 vid = self.AxisID2VoxID(axis_id)
-                for ch in range(len(self._vis[0])):
+                for ch in chs:
                     result[loc_a][loc_b] += self._vis[vid][ch]
         return result
     
     
-    def PlotVisibility2D(self,axis,frac):
+    def PlotVisibility2D(self,axis,frac,ch=None):
         '''
         Visualize a 2D slice of a visibility map at a fractional location along the specified axis
         INPUT
           axis - One of three cartesian axis 'x', 'y', or 'z'
           frac - A floating point value in the range [0,1] to specify the location, in fraction, along the axis
+          ch   - An integer or a list of integers specifying a (set of) optical detectors (if not provided, visibility for all detectors are summed)
         RETURN
           figure objecta
         '''
@@ -284,7 +354,7 @@ class PhotonLibrary(object):
             print('axis must be x, y, or z')
             raise ValueError
             
-        ar=self.Visibility2D(axis,frac)
+        ar=self.Visibility2D(axis,frac,ch)
         pos_range=np.column_stack([self.BoundaryMin(),self.BoundaryMax()])
         extent = np.concatenate([pos_range[ib], pos_range[ia]])
         

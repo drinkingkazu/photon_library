@@ -19,3 +19,11 @@ In a specific instance of ICARUS experiment, the number of voxels are (74,77,394
 ## Challenge
 
 **Goal** of the challenge is to come up with a learnable model that can accurately reproduce the knowledge (i.e. visibility per optical detector) of a PhotonLibrary. 
+
+
+## Create conda environment for Siren
+
+```
+conda env create -f environment.yml
+conda activate siren
+```

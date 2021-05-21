@@ -128,11 +128,13 @@ def tv_loss(data, v_shape, tv_dim):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--start_x', type=int, default=1,
-                    help='Starting slice in x axis')
-parser.add_argument('--end_x', type=int, default=10,
-                    help='Ending slice in x axis')
-parser.add_argument('--total_steps', type=int, default=100,
+parser.add_argument('--start_x', type=int, default=3,
+                    help='Starting slice_size in x axis')
+parser.add_argument('--end_x', type=int, default=33,
+                    help='Ending slice_size in x axis')
+parser.add_argument('--skip_x', type=int, default=5,
+                    help='Skip slice_size in x axis')
+parser.add_argument('--total_steps', type=int, default=1000,
                     help='Number of optimization iterations')
 parser.add_argument('--lr', type=float, default=1e-4,
                     help='Learning rate')
@@ -156,7 +158,7 @@ print('Load data ...')
 plib = PhotonLibrary()
 data_all = plib.numpy()
 
-for slice_size in range(params.end_x, params.start_x, -5):
+for slice_size in range(params.end_x, params.start_x, -1 * params.skip_x):
 
     print('A Siren model for the first {}-th slices for {} iterations'.format(slice_size, params.total_steps))
     

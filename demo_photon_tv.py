@@ -1,7 +1,7 @@
 import os
 import argparse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import torch
 from torch import nn
@@ -146,16 +146,22 @@ parser.add_argument('--render_scale', type=float, default=255.0,
                     help='Weight for Total Variation Loss')
 parser.add_argument('--print_steps', type=int, default=50,
                     help='Number of steps to print loss')
+parser.add_argument('--train', action="store_true", default=False,
+                    help="Flag to train. If not passed the script will try to find a pre-trained model for running inference")
+parser.add_argument('--add_err', action="store_true", default=False,
+                    help="Flag to add error to the visualization.")
 params = parser.parse_args()
 
 print('Load data ...')
 plib = PhotonLibrary()
 data_all = plib.numpy()
 
-for slice_size in range(params.start_x, params.end_x + 1):
-    print('Trainig a Siren model for the first {}-th slices for {} iterations'.format(slice_size, params.total_steps))
+for slice_size in range(params.end_x, params.start_x, -5):
+
+    print('A Siren model for the first {}-th slices for {} iterations'.format(slice_size, params.total_steps))
     
     output_path = params.output_dir + '/photon_' + str(slice_size)
+    weight_path = params.output_dir + '/photon_' + str(slice_size) + '_weights.pth' 
 
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -184,48 +190,67 @@ for slice_size in range(params.start_x, params.end_x + 1):
                       hidden_layers=3, outermost_linear=True)
     img_siren.cuda()
 
-    schedule_dict = {
-        'fixed': lambda x: 1,
-        'lineardecay': lambda x: 1.0 - x/params.total_steps,
-    }
+    if params.train:
+        schedule_dict = {
+            'fixed': lambda x: 1,
+            'lineardecay': lambda x: 1.0 - x/params.total_steps,
+        }
 
-    schedule_func = schedule_dict['lineardecay']
-    optim = torch.optim.Adam(lr=params.lr, params=img_siren.parameters())
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optim, schedule_func)
+        schedule_func = schedule_dict['lineardecay']
+        optim = torch.optim.Adam(lr=params.lr, params=img_siren.parameters())
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optim, schedule_func)
 
 
-    for step in range(params.total_steps):
-        model_output, coords = img_siren(coord_real)    
+        for step in range(params.total_steps):
+            model_output, coords = img_siren(coord_real)    
 
-        loss_tv = tv_loss(model_output, data_shape, params.tv_dim)
+            loss_tv = tv_loss(model_output, data_shape, params.tv_dim)
 
-        loss_rec = ((model_output - data)**2).mean()   
+            loss_rec = ((model_output - data)**2).mean()   
 
-        loss = params.tv_weight * loss_tv + loss_rec
+            loss = params.tv_weight * loss_tv + loss_rec
 
-        if step % params.print_steps == 0:
-            print('rec loss {:.5f}, tv loss {:.5f}, total loss {:.5f}'.format(loss_rec, loss_tv, loss))
+            if step % params.print_steps == 0:
+                print('rec loss {:.5f}, tv loss {:.5f}, total loss {:.5f}'.format(loss_rec, loss_tv, loss))
 
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-        scheduler.step()
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            scheduler.step()
+    else:
+        checkpoint = torch.load(weight_path)
+        img_siren.load_state_dict(checkpoint)
+        img_siren.eval()
+
+    model_output, coords = img_siren(coord_real)
+
 
     ground_truth_video = np.reshape(
       data.cpu().detach().numpy(), 
       (data_shape[0], data_shape[1], data_shape[2], 1)
     )
-    ground_truth_video = np.uint8((ground_truth_video * 1.0 + 0.5) * params.render_scale)
 
     predict_video = np.reshape(
         model_output.cpu().detach().numpy(), 
         (data_shape[0], data_shape[1], data_shape[2], 1)
     )
+
+    diff = np.sum(abs(ground_truth_video - predict_video), axis=(1,2,3))
+
+    ground_truth_video = np.uint8((ground_truth_video * 1.0 + 0.5) * params.render_scale)
     predict_video = np.uint8((predict_video * 1.0 + 0.5) * params.render_scale)
 
     render_video = np.concatenate((ground_truth_video, predict_video), axis=1)
 
     for step in range(render_video.shape[0]):
         im_name = os.path.join(output_path, '{:05d}.png'.format(step))
-        im_render = Image.fromarray(np.squeeze(render_video[step], -1) , 'L')
+        im_render = Image.fromarray(np.squeeze(render_video[step], -1) , 'L').convert('RGB')
+
+        if params.add_err:
+            draw = ImageDraw.Draw(im_render)
+            font = ImageFont.truetype("./font/Arsenal-Regular.otf", 16)
+            draw.text((0, 0), "{:.2f}".format(diff[step]), (255,0,0), font=font)
+
         im_render.save(im_name, 'png')
+
+    torch.save(img_siren.state_dict(), weight_path)
